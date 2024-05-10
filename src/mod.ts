@@ -38,51 +38,65 @@ class Mod implements IPostDBLoadModAsync
         {
             return;
         }
-
         // Setup a refresh interval to update once every hour
         Mod.updateTimer = setInterval(Mod.updatePrices, (60 * 60 * 1000));
     }
 
-    static async updatePrices(fetchPrices = true): Promise<boolean>
-    {
+    static async fetchPrices(fetchPrices = true, retries = 1): Promise<boolean>{
         const logger = Mod.container.resolve<ILogger>("WinstonLogger");
-        const databaseServer = Mod.container.resolve<DatabaseServer>("DatabaseServer");
-        const ragfairPriceService = Mod.container.resolve<RagfairPriceService>("RagfairPriceService");
-        const priceTable = databaseServer.getTables().templates.prices;
-        const itemTable = databaseServer.getTables().templates.items;
-        const handbookTable = databaseServer.getTables().templates.handbook;
+        const maxRetries = Mod.config.maxRetries
         let prices: Record<string, number>;
 
         // Fetch the latest prices.json if we're triggered with fetch enabled, or the prices file doesn't exist
-        if (fetchPrices || !fs.existsSync(Mod.pricesPath))
-        {
-            logger.info("Fetching Flea Prices...");
-            const response = await fetch("https://raw.githubusercontent.com/DrakiaXYZ/SPT-LiveFleaPriceDB/main/prices.json");
+        if (fetchPrices || !fs.existsSync(Mod.pricesPath)) {
+            logger.info("[LFP] Fetching Flea Prices...");
+            // Try fetch and catch error if fetch fails.
+            try {
+                const response = await fetch("https://raw.githubusercontent.com/DrakiaXYZ/SPT-LiveFleaPriceDB/main/prices.json");
+                prices = await response.json();
 
-            // If the request failed, disable future updating
-            if (!response?.ok)
-            {
-                logger.error(`Error fetching flea prices: ${response.status} (${response.statusText})`);
+                // Store the prices to disk for next time
+                fs.writeFileSync(Mod.pricesPath, JSON.stringify(prices));
+
+                // Update config file with the next update time
+                Mod.config.nextUpdate = Math.floor(Date.now() / 1000) + 3600;
+                fs.writeFileSync(Mod.configPath, JSON.stringify(Mod.config, null, 4));
+
+                logger.info("[LFP] Successfully fetched flea prices.")
+            } 
+            // Catch errors thrown by fetch.
+            catch (error) {
+                if (retries <= maxRetries) {
+                    logger.info("[LFP] Error fetching flea prices, retrying. Attempt #" + retries);
+                    return Mod.fetchPrices(true, retries + 1);
+                }
+                logger.info("[LFP] Retry count reached, stopping fetch attempts.");
                 clearInterval(Mod.updateTimer);
-                return false;
+                throw error
             }
-
-            prices = await response.json();
-
-            // Store the prices to disk for next time
-            fs.writeFileSync(Mod.pricesPath, JSON.stringify(prices));
-
-            // Update config file with the next update time
-            Mod.config.nextUpdate = Math.floor(Date.now() / 1000) + 3600;
-            fs.writeFileSync(Mod.configPath, JSON.stringify(Mod.config, null, 4));
+            
         }
-        // Otherwise, read the file from disk
+        // Otherwise, read the file from disk.
         else
         {
             prices = JSON.parse(fs.readFileSync(Mod.pricesPath, "utf-8"));
         }
+        return prices
+    }
 
+    static async updatePrices(prices): Promise<boolean>
+    {
+        const databaseServer = Mod.container.resolve<DatabaseServer>("DatabaseServer");
+        const ragfairPriceService = Mod.container.resolve<RagfairPriceService>("RagfairPriceService");
+        const priceTable = databaseServer.getTables().templates.prices; 
+        const itemTable = databaseServer.getTables().templates.items;
+        const handbookTable = databaseServer.getTables().templates.handbook;
+        const logger = Mod.container.resolve<ILogger>("WinstonLogger");
+
+        // Fetch prices.
+        await prices = Mod.fetchPrices();
         // Loop through the new prices file, updating all prices present
+        logger.info("[LFP] Applying flea data to server.");
         for (const itemId in prices)
         {
             if (!itemTable[itemId])
@@ -113,7 +127,7 @@ class Mod implements IPostDBLoadModAsync
         // biome-ignore lint/suspicious/noExplicitAny: <explanation>
         (ragfairPriceService as any).generateDynamicPrices();
 
-        logger.info("Flea Prices Updated!");
+        logger.info("[LFP] Flea Prices Updated!");
 
         return true;
     }
