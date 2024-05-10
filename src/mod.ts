@@ -69,6 +69,7 @@ class Mod implements IPostDBLoadModAsync
             clearInterval(Mod.updateTimer);
             throw error
         }
+        return prices;
     }
 
     static async updatePrices(): Promise<boolean>
